@@ -77,12 +77,12 @@ jobs:
 
       - name: Compile Windows XP Keygen
         run: |
-          i686-w64-mingw32.static-g++ -Wall -Wextra -g3 main.cpp -o keygen_xp.exe -lssl -lcrypto
+          i686-w64-mingw32.static-g++ -Wall -Wextra -g3 main.cpp -o keygen_xp.exe -lssl -lcrypto -lws2_32 -lcrypt32 -lz -lgdi32
           echo "Successfully compiled keygen_xp.exe"
 
       - name: Compile Windows Server 2003 Keygen
         run: |
-          i686-w64-mingw32.static-g++ -Wall -Wextra -g3 Srv2003KGmain.cpp -o Srv2003KG.exe -lssl -lcrypto
+          i686-w64-mingw32.static-g++ -Wall -Wextra -g3 Srv2003KGmain.cpp -o Srv2003KG.exe -lssl -lcrypto -lws2_32 -lcrypt32 -lz -lgdi32
           echo "Successfully compiled Srv2003KG.exe"
 
       - name: Upload Executables as Artifact
