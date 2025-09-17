@@ -12,6 +12,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Cache MXE
+        id: cache-mxe
+        uses: actions/cache@v4
+        with:
+          path: mxe
+          key: ${{ runner.os }}-mxe
+
       - name: Install MXE dependencies
         run: |
           sudo apt-get update
@@ -58,6 +65,7 @@ jobs:
             xz-utils
 
       - name: Install MXE
+        if: steps.cache-mxe.outputs.cache-hit != 'true'
         run: |
           git clone https://github.com/mxe/mxe.git
           cd mxe
@@ -69,12 +77,12 @@ jobs:
 
       - name: Compile Windows XP Keygen
         run: |
-          i686-w64-mingw32.static-g++ -Wall -Wextra -g3 main.cpp -o keygen_xp.exe
+          i686-w64-mingw32.static-g++ -Wall -Wextra -g3 main.cpp -o keygen_xp.exe -lssl -lcrypto
           echo "Successfully compiled keygen_xp.exe"
 
       - name: Compile Windows Server 2003 Keygen
         run: |
-          i686-w64-mingw32.static-g++ -Wall -Wextra -g3 Srv2003KGmain.cpp -o Srv2003KG.exe
+          i686-w64-mingw32.static-g++ -Wall -Wextra -g3 Srv2003KGmain.cpp -o Srv2003KG.exe -lssl -lcrypto
           echo "Successfully compiled Srv2003KG.exe"
 
       - name: Upload Executables as Artifact
