@@ -12,10 +12,20 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install MXE
+      - name: Install MXE dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y wget make gcc g++ pkg-config
+          sudo apt-get install -y \
+            autopoint \
+            gdk-pixbuf2.0-bin \
+            gperf \
+            intltool \
+            libtool \
+            lzip \
+            python3-mako
+
+      - name: Install MXE
+        run: |
           git clone https://github.com/mxe/mxe.git
           cd mxe
           make MXE_TARGETS='i686-w64-mingw32.static' openssl
