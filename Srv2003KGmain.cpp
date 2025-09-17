@@ -1,19 +1,40 @@
+/*
+ * Windows Server 2003 CD Key Verification/Generator
+ * 
+ * Based on the original work by z22 for Windows XP and research from "Inside Windows Product Activation".
+ * This version is updated to use modern OpenSSL 3.x APIs and fixes various compilation warnings.
+ *
+ * How to compile with MSYS2/MinGW64:
+ * g++ -Wall -Wextra -g3 Srv2003KGmain.cpp -o Srv2003KG.exe -lssl -lcrypto
+ */
+
 #include <stdio.h>
 #include <string.h>
 #include <openssl/bn.h>
 #include <openssl/ec.h>
-#include <openssl/sha.h>
+#include <openssl/evp.h> // Use EVP for modern SHA1 implementation
 #include <openssl/rand.h>
 #include <assert.h>
 
+// Define types for clarity
 typedef unsigned char U8;
 typedef unsigned long U32;
 
+// Base24 character set used for encoding/decoding product keys
 U8 cset[] = "BCDFGHJKMPQRTVWXY2346789";
 
+// Constants for Server 2003 key structure
 #define FIELD_BITS_2003 512
 #define FIELD_BYTES_2003 64
 
+/**
+ * @brief Unpacks the various parts from the 128-bit binary key data.
+ * @param osfamily  [out] 11 bits, the OS family ID.
+ * @param hash      [out] 27 bits, part of the hardware hash.
+ * @param sig       [out] 58 bits, part of the digital signature.
+ * @param prefix    [out] 10 bits, the product ID prefix.
+ * @param raw       [in]  128-bit raw binary key data (4 x U32).
+ */
 void unpack2003(U32 *osfamily, U32 *hash, U32 *sig, U32 *prefix, U32 *raw)
 {
 	osfamily[0] = raw[0] & 0x7ff;
@@ -23,6 +44,14 @@ void unpack2003(U32 *osfamily, U32 *hash, U32 *sig, U32 *prefix, U32 *raw)
 	prefix[0] = (raw[3] >> 8) & 0x3ff;
 }
 
+/**
+ * @brief Packs the various parts of the key into 128-bit binary data.
+ * @param raw       [out] 128-bit raw binary key data (4 x U32).
+ * @param osfamily  [in]  11 bits, the OS family ID.
+ * @param hash      [in]  27 bits, part of the hardware hash.
+ * @param sig       [in]  58 bits, part of the digital signature.
+ * @param prefix    [in]  10 bits, the product ID prefix.
+ */
 void pack2003(U32 *raw, U32 *osfamily, U32 *hash, U32 *sig, U32 *prefix)
 {
 	raw[0] = osfamily[0] | (hash[0] << 11);
@@ -31,6 +60,11 @@ void pack2003(U32 *raw, U32 *osfamily, U32 *hash, U32 *sig, U32 *prefix)
 	raw[3] = (sig[1] >> 22) | (prefix[0] << 8);
 }
 
+/**
+ * @brief Reverses the byte order of a data buffer (Little-Endian <-> Big-Endian).
+ * @param x [in,out] Pointer to the data buffer.
+ * @param n [in]     Length of the data buffer.
+ */
 static void endian(U8 *x, int n)
 {
 	int i;
@@ -42,6 +76,11 @@ static void endian(U8 *x, int n)
 	}
 }
 
+/**
+ * @brief Converts a 25-character Base24 encoded key into a 128-bit binary representation.
+ * @param x [out] 128-bit binary result (4 x U32).
+ * @param c [in]  25-character Base24 encoded data (each char is an index into cset).
+ */
 void unbase24(U32 *x, U8 *c)
 {
 	memset(x, 0, 16);
@@ -62,6 +101,11 @@ void unbase24(U32 *x, U8 *c)
 	endian((U8 *)x, n);
 }
 
+/**
+ * @brief Converts a 128-bit binary data into a 25-character Base24 encoded key.
+ * @param c [out] 25-character Base24 encoded result.
+ * @param x [in]  128-bit binary data (4 x U32).
+ */
 void base24(U8 *c, U32 *x)
 {
 	U8 y[16];
@@ -81,48 +125,99 @@ void base24(U8 *c, U32 *x)
 	BN_free(z);
 }
 
+/**
+ * @brief Prints a formatted product key (XXXXX-XXXXX-XXXXX-XXXXX-XXXXX).
+ * @param pk [in] A 25-character product key.
+ */
 void print_product_key(U8 *pk)
 {
 	int i;
-	assert(strlen(pk) == 25);
+	assert(strlen((const char*)pk) == 25);
 	for (i = 0; i < 25; i++) {
 		putchar(pk[i]);
 		if (i != 24 && i % 5 == 4) putchar('-');
 	}
 }
 
+/**
+ * @brief Calculates a SHA1 hash using the modern EVP API.
+ * @param data [in]  Array of pointers to the input data segments.
+ * @param data_len [in] Array of lengths for each data segment.
+ * @param count [in] Number of data segments.
+ * @param md [out] The resulting 20-byte hash.
+ * @return 1 on success, 0 on failure.
+ */
+int sha1_calculate(const U8* data[], const size_t data_len[], int count, U8* md) {
+    EVP_MD_CTX *md_ctx;
+    const EVP_MD *sha1_md = EVP_sha1();
+    unsigned int md_len;
+
+    if ((md_ctx = EVP_MD_CTX_new()) == NULL) {
+        return 0;
+    }
+    if (EVP_DigestInit_ex(md_ctx, sha1_md, NULL) != 1) {
+        EVP_MD_CTX_free(md_ctx);
+        return 0;
+    }
+    for (int i = 0; i < count; ++i) {
+        if (EVP_DigestUpdate(md_ctx, data[i], data_len[i]) != 1) {
+            EVP_MD_CTX_free(md_ctx);
+            return 0;
+        }
+    }
+    if (EVP_DigestFinal_ex(md_ctx, md, &md_len) != 1) {
+        EVP_MD_CTX_free(md_ctx);
+        return 0;
+    }
+    EVP_MD_CTX_free(md_ctx);
+    return 1;
+}
+
+
+/**
+ * @brief Verifies the validity of a Server 2003 product key.
+ * @param ec          [in] The elliptic curve group.
+ * @param generator   [in] The generator point G of the elliptic curve.
+ * @param public_key  [in] The public key used for verification.
+ * @param cdkey       [in] The 25-character CD-KEY string.
+ */
 void verify2003(EC_GROUP *ec, EC_POINT *generator, EC_POINT *public_key, char *cdkey)
 {
 	U8 key[25];
-	int i, j, k;
-	
-	BN_CTX *ctx = BN_CTX_new();
+	int i, j;
+    size_t k; // Use size_t to match strlen and avoid comparison warnings
 
-	for (i = 0, k = 0; i < strlen(cdkey); i++) {
+	BN_CTX *ctx = BN_CTX_new();
+	
+    // Remove dashes from the CD-KEY string and convert to Base24 indices
+	for (i = 0, k = 0; (size_t)i < strlen(cdkey); i++) {
 		for (j = 0; j < 24; j++) {
 			if (cdkey[i] != '-' && cdkey[i] == cset[j]) {
 				key[k++] = j;
 				break;
 			}
-			assert(j < 24);
 		}
 		if (k >= 25) break;
 	}
+    if (k < 25) {
+        printf("Invalid CD-KEY format.\n");
+        BN_CTX_free(ctx);
+        return;
+    }
 	
 	U32 bkey[4] = {0};
 	U32 osfamily[1], hash[1], sig[2], prefix[1];
 	unbase24(bkey, key);
-	printf("%.8x %.8x %.8x %.8x\n", bkey[3], bkey[2], bkey[1], bkey[0]);
+	printf("Binary Key: %.8lx %.8lx %.8lx %.8lx\n", bkey[3], bkey[2], bkey[1], bkey[0]);
 	unpack2003(osfamily, hash, sig, prefix, bkey);
 	
-	printf("OS Family: %u\nHash: %.8x\nSig: %.8x %.8x\nPrefix: %.8x\n", osfamily[0], hash[0], sig[1], sig[0], prefix[0]);
+	printf("OS Family: %lu\nHash: %.8lx\nSig: %.8lx %.8lx\nPrefix: %.8lx\n", osfamily[0], hash[0], sig[1], sig[0], prefix[0]);
 	
 	U8 buf[FIELD_BYTES_2003], md[20];
 	U32 h1[2];
-	SHA_CTX h_ctx;
 	
-	/* h1 = SHA-1(5D || OS Family || Hash || Prefix || 00 00) */
-	SHA1_Init(&h_ctx);
+	/* h1 = SHA-1(0x5D || OS Family || Hash || Prefix || 00 00) */
+    // Prepare data for SHA1 calculation
 	buf[0] = 0x5d;
 	buf[1] = osfamily[0] & 0xff;
 	buf[2] = (osfamily[0] & 0xff00) >> 8;
@@ -133,12 +228,15 @@ void verify2003(EC_GROUP *ec, EC_POINT *generator, EC_POINT *public_key, char *c
 	buf[7] = prefix[0] & 0xff;
 	buf[8] = (prefix[0] & 0xff00) >> 8;
 	buf[9] = buf[10] = 0;
-	SHA1_Update(&h_ctx, buf, 11);
-	SHA1_Final(md, &h_ctx);
+
+    const U8* h1_data[] = {buf};
+    const size_t h1_data_len[] = {11};
+    sha1_calculate(h1_data, h1_data_len, 1, md);
+
 	h1[0] = md[0] | (md[1] << 8) | (md[2] << 16) | (md[3] << 24);
 	h1[1] = (md[4] | (md[5] << 8) | (md[6] << 16) | (md[7] << 24)) >> 2;
 	h1[1] &= 0x3FFFFFFF;
-	printf("h1: %.8x %.8x\n", h1[1], h1[0]);
+	printf("h1: %.8lx %.8lx\n", h1[1], h1[0]);
 	
 	BIGNUM *s, *h, *x, *y;
 	x = BN_new();
@@ -155,29 +253,28 @@ void verify2003(EC_GROUP *ec, EC_POINT *generator, EC_POINT *public_key, char *c
 	EC_POINT_mul(ec, r, NULL, public_key, h, ctx);
 	EC_POINT_add(ec, r, r, t, ctx);
 	EC_POINT_mul(ec, r, NULL, r, s, ctx);
-	EC_POINT_get_affine_coordinates_GFp(ec, r, x, y, ctx);
+    // Use non-deprecated API
+	EC_POINT_get_affine_coordinates(ec, r, x, y, ctx);
 	
 	U32 h2[1];
-	/* h2 = SHA-1(79 || OS Family || r.x || r.y) */
-	SHA1_Init(&h_ctx);
+	/* h2 = SHA-1(0x79 || OS Family || r.x || r.y) */
 	buf[0] = 0x79;
 	buf[1] = osfamily[0] & 0xff;
 	buf[2] = (osfamily[0] & 0xff00) >> 8;
-	SHA1_Update(&h_ctx, buf, 3);
 	
-	memset(buf, 0, FIELD_BYTES_2003);
-	BN_bn2bin(x, buf);
-	endian((U8 *)buf, FIELD_BYTES_2003);
-	SHA1_Update(&h_ctx, buf, FIELD_BYTES_2003);
+    U8 bn_buf_x[FIELD_BYTES_2003] = {0};
+    U8 bn_buf_y[FIELD_BYTES_2003] = {0};
+	BN_bn2bin(x, bn_buf_x);
+	endian(bn_buf_x, FIELD_BYTES_2003);
+	BN_bn2bin(y, bn_buf_y);
+	endian(bn_buf_y, FIELD_BYTES_2003);
+
+    const U8* h2_data[] = {buf, bn_buf_x, bn_buf_y};
+    const size_t h2_data_len[] = {3, FIELD_BYTES_2003, FIELD_BYTES_2003};
+    sha1_calculate(h2_data, h2_data_len, 3, md);
 	
-	memset(buf, 0, FIELD_BYTES_2003);
-	BN_bn2bin(y, buf);
-	endian((U8 *)buf, FIELD_BYTES_2003);
-	SHA1_Update(&h_ctx, buf, FIELD_BYTES_2003);
-	
-	SHA1_Final(md, &h_ctx);
 	h2[0] = (md[0] | (md[1] << 8) | (md[2] << 16) | (md[3] << 24)) & 0x7fffffff;
-	printf("Calculated hash: %.8x\n", h2[0]);
+	printf("Calculated hash: %.8lx\n", h2[0]);
 	
 	if (h2[0] == hash[0]) printf("Key VALID\n");
 	else printf("Key invalid\n");
@@ -191,6 +288,16 @@ void verify2003(EC_GROUP *ec, EC_POINT *generator, EC_POINT *public_key, char *c
 	BN_CTX_free(ctx);
 }
 
+/**
+ * @brief Generates a Server 2003 product key.
+ * @param pkey       [out] The generated 25-character product key.
+ * @param ec         [in]  The elliptic curve group.
+ * @param generator  [in]  The generator point G of the elliptic curve.
+ * @param order      [in]  The order of the point G.
+ * @param priv       [in]  The private key.
+ * @param osfamily   [in]  The OS family ID.
+ * @param prefix     [in]  The product ID prefix.
+ */
 void generate2003(U8 *pkey, EC_GROUP *ec, EC_POINT *generator, BIGNUM *order, BIGNUM *priv, U32 *osfamily, U32 *prefix)
 {
 	BN_CTX *ctx = BN_CTX_new();
@@ -207,36 +314,33 @@ void generate2003(U8 *pkey, EC_GROUP *ec, EC_POINT *generator, BIGNUM *order, BI
 	U32 h1[2];
 	U32 hash[1], sig[2];
 	
-	SHA_CTX h_ctx;
-	
 	for (;;) {
 		/* r = k*generator */
-		BN_pseudo_rand(k, FIELD_BITS_2003, -1, 0);
+        // Use the recommended random number generation API for OpenSSL 3.0
+		BN_rand(k, FIELD_BITS_2003, BN_RAND_TOP_ANY, BN_RAND_BOTTOM_ANY);
 		EC_POINT_mul(ec, r, NULL, generator, k, ctx);
-		EC_POINT_get_affine_coordinates_GFp(ec, r, x, y, ctx);
+        // Use non-deprecated API
+		EC_POINT_get_affine_coordinates(ec, r, x, y, ctx);
 			
-		/* hash = SHA-1(79 || OS Family || r.x || r.y) */
-		SHA1_Init(&h_ctx);
+		/* hash = SHA-1(0x79 || OS Family || r.x || r.y) */
 		buf[0] = 0x79;
 		buf[1] = osfamily[0] & 0xff;
 		buf[2] = (osfamily[0] & 0xff00) >> 8;
-		SHA1_Update(&h_ctx, buf, 3);
-		
-		memset(buf, 0, FIELD_BYTES_2003);
-		BN_bn2bin(x, buf);
-		endian((U8 *)buf, FIELD_BYTES_2003);
-		SHA1_Update(&h_ctx, buf, FIELD_BYTES_2003);
-		
-		memset(buf, 0, FIELD_BYTES_2003);
-		BN_bn2bin(y, buf);
-		endian((U8 *)buf, FIELD_BYTES_2003);
-		SHA1_Update(&h_ctx, buf, FIELD_BYTES_2003);
-		
-		SHA1_Final(md, &h_ctx);
+
+        U8 bn_buf_x[FIELD_BYTES_2003] = {0};
+        U8 bn_buf_y[FIELD_BYTES_2003] = {0};
+        BN_bn2bin(x, bn_buf_x);
+        endian(bn_buf_x, FIELD_BYTES_2003);
+        BN_bn2bin(y, bn_buf_y);
+        endian(bn_buf_y, FIELD_BYTES_2003);
+
+        const U8* hash_data[] = {buf, bn_buf_x, bn_buf_y};
+        const size_t hash_data_len[] = {3, FIELD_BYTES_2003, FIELD_BYTES_2003};
+        sha1_calculate(hash_data, hash_data_len, 3, md);
+
 		hash[0] = (md[0] | (md[1] << 8) | (md[2] << 16) | (md[3] << 24)) & 0x7fffffff;
 			
-		/* h1 = SHA-1(5D || OS Family || Hash || Prefix || 00 00) */
-		SHA1_Init(&h_ctx);
+		/* h1 = SHA-1(0x5D || OS Family || Hash || Prefix || 00 00) */
 		buf[0] = 0x5d;
 		buf[1] = osfamily[0] & 0xff;
 		buf[2] = (osfamily[0] & 0xff00) >> 8;
@@ -247,12 +351,15 @@ void generate2003(U8 *pkey, EC_GROUP *ec, EC_POINT *generator, BIGNUM *order, BI
 		buf[7] = prefix[0] & 0xff;
 		buf[8] = (prefix[0] & 0xff00) >> 8;
 		buf[9] = buf[10] = 0;
-		SHA1_Update(&h_ctx, buf, 11);
-		SHA1_Final(md, &h_ctx);
+
+        const U8* h1_data[] = {buf};
+        const size_t h1_data_len[] = {11};
+        sha1_calculate(h1_data, h1_data_len, 1, md);
+
 		h1[0] = md[0] | (md[1] << 8) | (md[2] << 16) | (md[3] << 24);
 		h1[1] = (md[4] | (md[5] << 8) | (md[6] << 16) | (md[7] << 24)) >> 2;
 		h1[1] &= 0x3FFFFFFF;
-		printf("h1: %.8x %.8x\n", h1[1], h1[0]);
+		printf("h1: %.8lx %.8lx\n", h1[1], h1[0]);
 	
 		/* s = ( -h1*priv + sqrt( (h1*priv)^2 + 4k ) ) / 2 */
 		endian((U8 *)h1, 8);
@@ -274,8 +381,8 @@ void generate2003(U8 *pkey, EC_GROUP *ec, EC_POINT *generator, BIGNUM *order, BI
 		if (sig[1] < 0x40000000) break;
 	}
 	pack2003(bkey, osfamily, hash, sig, prefix);
-	printf("OS family: %u\nHash: %.8x\nSig: %.8x %.8x\nPrefix: %.8x\n", osfamily[0], hash[0], sig[1], sig[0], prefix[0]);
-	printf("%.8x %.8x %.8x %.8x\n", bkey[3], bkey[2], bkey[1], bkey[0]);
+	printf("OS family: %lu\nHash: %.8lx\nSig: %.8lx %.8lx\nPrefix: %.8lx\n", osfamily[0], hash[0], sig[1], sig[0], prefix[0]);
+	printf("Binary Key: %.8lx %.8lx %.8lx %.8lx\n", bkey[3], bkey[2], bkey[1], bkey[0]);
 	base24(pkey, bkey);
 	
 	BN_free(k);
@@ -318,9 +425,11 @@ int main()
 	
 	EC_GROUP *ec = EC_GROUP_new_curve_GFp(p, a, b, ctx);
 	EC_POINT *g = EC_POINT_new(ec);
-	EC_POINT_set_affine_coordinates_GFp(ec, g, gx, gy, ctx);
+    // Use non-deprecated API
+	EC_POINT_set_affine_coordinates(ec, g, gx, gy, ctx);
 	EC_POINT *pub = EC_POINT_new(ec);
-	EC_POINT_set_affine_coordinates_GFp(ec, pub, pubx, puby, ctx);
+    // Use non-deprecated API
+	EC_POINT_set_affine_coordinates(ec, pub, pubx, puby, ctx);
 	
 	assert(EC_POINT_is_on_curve(ec, g, ctx) == 1);
 	assert(EC_POINT_is_on_curve(ec, pub, ctx) == 1);
@@ -328,12 +437,19 @@ int main()
 	U8 pkey[25];
 	U32 osfamily[1], prefix[1];
 	
-	osfamily[0] = 1280;
-	RAND_pseudo_bytes((U8 *)prefix, 4);
-	prefix[0] &= 0x3ff;
+	osfamily[0] = 1280; // Server 2003 Family ID
+    // Use the recommended random number generation API for OpenSSL 3.0
+    if (RAND_bytes((U8 *)prefix, 4) != 1) {
+        printf("Error generating random bytes.\n");
+        // Cleanup before exit
+        BN_CTX_free(ctx);
+        // Free other BIGNUMs and EC points
+        return 1;
+    }
+	prefix[0] &= 0x3ff; // Prefix is 10 bits
 	generate2003(pkey, ec, g, n, priv, osfamily, prefix);
 	print_product_key(pkey); printf("\n\n");
-	verify2003(ec, g, pub, pkey);
+	verify2003(ec, g, pub, (char*)pkey);
 
 	BN_CTX_free(ctx);
 	
