@@ -12,11 +12,17 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up MXE for Windows XP (i686-static)
-        uses: mxe/setup-mxe@v1
-        with:
-          mxe-target: i686-w64-mingw32.static
-          packages: openssl
+      - name: Install MXE
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget make gcc g++ pkg-config
+          git clone https://github.com/mxe/mxe.git
+          cd mxe
+          make MXE_TARGETS='i686-w64-mingw32.static' openssl
+        shell: bash
+
+      - name: Add MXE to PATH
+        run: echo "$(pwd)/mxe/usr/bin" >> $GITHUB_PATH
 
       - name: Compile Windows XP Keygen
         run: |
